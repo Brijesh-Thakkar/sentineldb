@@ -1,0 +1,149 @@
+#ifndef KVSTORE_H
+#define KVSTORE_H
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <optional>
+#include <memory>
+#include <chrono>
+#include "status.h"
+#include "wal.h"
+#include "guard.h"
+
+// Represents a versioned value with timestamp
+struct Version {
+    std::chrono::system_clock::time_point timestamp;
+    std::string value;
+    
+    Version(const std::string& val) 
+        : timestamp(std::chrono::system_clock::now()), value(val) {}
+    
+    Version(std::chrono::system_clock::time_point ts, const std::string& val)
+        : timestamp(ts), value(val) {}
+};
+
+// Retention policy modes
+enum class RetentionMode {
+    FULL,    // Keep all versions
+    LAST_N,  // Keep only the last N versions
+    LAST_T   // Keep only versions within the last T seconds
+};
+
+// Retention policy configuration
+struct RetentionPolicy {
+    RetentionMode mode;
+    int count;        // For LAST_N mode: number of versions to keep
+    int seconds;      // For LAST_T mode: time window in seconds
+    
+    // Default: keep all versions
+    RetentionPolicy() : mode(RetentionMode::FULL), count(0), seconds(0) {}
+    
+    RetentionPolicy(RetentionMode m, int val) 
+        : mode(m), count(m == RetentionMode::LAST_N ? val : 0), 
+          seconds(m == RetentionMode::LAST_T ? val : 0) {}
+};
+
+// Explain result for temporal queries
+struct ExplainResult {
+    bool found;
+    std::string key;
+    std::chrono::system_clock::time_point queryTimestamp;
+    std::optional<Version> selectedVersion;
+    std::string reasoning;
+    std::vector<Version> skippedVersions;
+    size_t totalVersions;
+};
+
+class KVStore {
+private:
+    std::unordered_map<std::string, std::vector<Version>> store;
+    std::shared_ptr<WAL> wal;
+    bool walEnabled;
+    RetentionPolicy retentionPolicy;
+    std::vector<std::shared_ptr<Guard>> guards;  // Active guard constraints
+    DecisionPolicy decisionPolicy;  // Active decision policy for guard violations
+    
+    // Apply retention policy to a key's versions
+    void applyRetention(const std::string& key);
+    
+    // Simulate write on copy without mutating real state
+    WriteEvaluation simulateWrite(const std::string& key, const std::string& value);
+    
+    // Apply decision policy to guard evaluation results
+    void applyDecisionPolicy(WriteEvaluation& evaluation);
+
+public:
+    // Constructor with optional WAL
+    explicit KVStore(std::shared_ptr<WAL> walPtr = nullptr);
+    
+    // Set a key-value pair (creates version with current timestamp)
+    Status set(const std::string& key, const std::string& value);
+    
+    // Set a key-value pair with specific timestamp (for replay)
+    Status setAtTime(const std::string& key, const std::string& value,
+                     std::chrono::system_clock::time_point timestamp);
+    
+    // Get a value by key
+    std::optional<std::string> get(const std::string& key);
+    
+    // Delete a key
+    Status del(const std::string& key);
+    
+    // Get value at or before a specific timestamp
+    std::optional<std::string> getAtTime(const std::string& key, 
+                                          std::chrono::system_clock::time_point timestamp);
+    
+    // Explain temporal query - shows reasoning for version selection
+    ExplainResult explainGetAtTime(const std::string& key,
+                                   std::chrono::system_clock::time_point timestamp);
+    
+    // Get all versions of a key
+    std::vector<Version> getHistory(const std::string& key);
+    
+    // Check if key exists
+    bool exists(const std::string& key) const;
+    
+    // Get the number of keys
+    size_t size() const;
+    
+    // Get all data (for snapshot creation) - returns latest version of each key
+    std::unordered_map<std::string, std::string> getAllData() const;
+    
+    // Disable/enable WAL temporarily (for replay)
+    void setWalEnabled(bool enabled);
+    
+    // Set retention policy
+    void setRetentionPolicy(const RetentionPolicy& policy);
+    
+    // Get current retention policy
+    const RetentionPolicy& getRetentionPolicy() const;
+    
+    // ========== Write Evaluation & Guard Management ==========
+    
+    // Propose a write - evaluates guards without committing
+    WriteEvaluation proposeSet(const std::string& key, const std::string& value);
+    
+    // Commit a write (after proposal accepted or user override)
+    Status commitSet(const std::string& key, const std::string& value);
+    
+    // Add a guard constraint
+    void addGuard(std::shared_ptr<Guard> guard);
+    
+    // Remove a guard by name
+    bool removeGuard(const std::string& name);
+    
+    // Get all guards
+    const std::vector<std::shared_ptr<Guard>>& getGuards() const;
+    
+    // Get guards that apply to a specific key
+    std::vector<std::shared_ptr<Guard>> getGuardsForKey(const std::string& key) const;
+    
+    // Set decision policy
+    void setDecisionPolicy(DecisionPolicy policy);
+    
+    // Get current decision policy
+    DecisionPolicy getDecisionPolicy() const;
+};
+
+#endif // KVSTORE_H

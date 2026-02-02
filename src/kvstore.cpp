@@ -1,0 +1,439 @@
+#include "kvstore.h"
+#include <algorithm>
+#include <sstream>
+
+KVStore::KVStore(std::shared_ptr<WAL> walPtr) 
+    : wal(walPtr), walEnabled(true), decisionPolicy(DecisionPolicy::SAFE_DEFAULT) {}
+
+Status KVStore::set(const std::string& key, const std::string& value) {
+    // Create version with current timestamp
+    auto timestamp = std::chrono::system_clock::now();
+    
+    // Write to WAL first (if enabled)
+    if (walEnabled && wal && wal->isEnabled()) {
+        Status walStatus = wal->logSet(key, value, timestamp);
+        // Continue even if WAL write fails (warn user but don't crash)
+        if (walStatus != Status::OK) {
+            // Warning already printed by WAL
+        }
+    }
+    
+    // Append new version to in-memory store
+    store[key].emplace_back(timestamp, value);
+    
+    // Apply retention policy
+    applyRetention(key);
+    
+    return Status::OK;
+}
+
+Status KVStore::setAtTime(const std::string& key, const std::string& value,
+                          std::chrono::system_clock::time_point timestamp) {
+    // This is for replay - do NOT log to WAL
+    // Just add the version with the given timestamp
+    store[key].emplace_back(timestamp, value);
+    
+    // Apply retention policy
+    applyRetention(key);
+    
+    return Status::OK;
+}
+
+std::optional<std::string> KVStore::get(const std::string& key) {
+    auto it = store.find(key);
+    if (it != store.end() && !it->second.empty()) {
+        // Return the latest version (last element)
+        return it->second.back().value;
+    }
+    return std::nullopt;
+}
+
+Status KVStore::del(const std::string& key) {
+    auto it = store.find(key);
+    if (it != store.end()) {
+        // Write to WAL first (if enabled)
+        if (walEnabled && wal && wal->isEnabled()) {
+            Status walStatus = wal->logDel(key);
+            // Continue even if WAL write fails
+            if (walStatus != Status::OK) {
+                // Warning already printed by WAL
+            }
+        }
+        
+        // Remove all versions from in-memory store
+        store.erase(it);
+        return Status::OK;
+    }
+    return Status::NOT_FOUND;
+}
+
+std::optional<std::string> KVStore::getAtTime(const std::string& key, 
+                                               std::chrono::system_clock::time_point timestamp) {
+    auto it = store.find(key);
+    if (it == store.end() || it->second.empty()) {
+        return std::nullopt;
+    }
+    
+    // Find the latest version at or before the given timestamp
+    const auto& versions = it->second;
+    std::optional<std::string> result;
+    
+    for (const auto& version : versions) {
+        if (version.timestamp <= timestamp) {
+            result = version.value;
+        } else {
+            // Versions are in chronological order, so we can stop
+            break;
+        }
+    }
+    
+    return result;
+}
+
+ExplainResult KVStore::explainGetAtTime(const std::string& key,
+                                         std::chrono::system_clock::time_point timestamp) {
+    ExplainResult result;
+    result.found = false;
+    result.key = key;
+    result.queryTimestamp = timestamp;
+    result.totalVersions = 0;
+    
+    auto it = store.find(key);
+    if (it == store.end() || it->second.empty()) {
+        result.reasoning = "Key not found in database";
+        return result;
+    }
+    
+    const auto& versions = it->second;
+    result.totalVersions = versions.size();
+    
+    // Track which version we select and which we skip
+    std::optional<size_t> selectedIndex;
+    
+    for (size_t i = 0; i < versions.size(); ++i) {
+        const auto& version = versions[i];
+        
+        if (version.timestamp <= timestamp) {
+            // This version is at or before our query time
+            if (selectedIndex.has_value()) {
+                // We previously selected a version, now skipping it for this newer one
+                result.skippedVersions.push_back(versions[selectedIndex.value()]);
+            }
+            selectedIndex = i;
+        } else {
+            // This version is after our query time - skip it
+            // (don't add to skippedVersions since it's not relevant for explanation)
+            break;
+        }
+    }
+    
+    if (selectedIndex.has_value()) {
+        result.found = true;
+        result.selectedVersion = versions[selectedIndex.value()];
+        
+        // Build reasoning
+        std::stringstream reasoning;
+        reasoning << "Selected version at index " << selectedIndex.value() 
+                  << " (0-based) out of " << result.totalVersions << " total versions. ";
+        reasoning << "This is the most recent version at or before the query timestamp.";
+        
+        if (!result.skippedVersions.empty()) {
+            reasoning << " Skipped " << result.skippedVersions.size() 
+                      << " older version(s) that were also valid but superseded.";
+        }
+        
+        // Count versions after query time
+        size_t versionsAfter = result.totalVersions - selectedIndex.value() - 1;
+        if (versionsAfter > 0) {
+            reasoning << " Excluded " << versionsAfter 
+                      << " version(s) that occurred after the query timestamp.";
+        }
+        
+        result.reasoning = reasoning.str();
+    } else {
+        result.reasoning = "No version found at or before the query timestamp. All " 
+                          + std::to_string(result.totalVersions) 
+                          + " version(s) occurred after the query time.";
+    }
+    
+    return result;
+}
+
+std::vector<Version> KVStore::getHistory(const std::string& key) {
+    auto it = store.find(key);
+    if (it != store.end()) {
+        return it->second;
+    }
+    return std::vector<Version>();
+}
+
+bool KVStore::exists(const std::string& key) const {
+    return store.find(key) != store.end();
+}
+
+size_t KVStore::size() const {
+    return store.size();
+}
+
+std::unordered_map<std::string, std::string> KVStore::getAllData() const {
+    std::unordered_map<std::string, std::string> result;
+    for (const auto& [key, versions] : store) {
+        if (!versions.empty()) {
+            // Get the latest version
+            result[key] = versions.back().value;
+        }
+    }
+    return result;
+}
+
+void KVStore::setWalEnabled(bool enabled) {
+    walEnabled = enabled;
+}
+
+void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
+    retentionPolicy = policy;
+    
+    // Apply new policy to all existing keys
+    for (auto& [key, versions] : store) {
+        if (!versions.empty()) {
+            applyRetention(key);
+        }
+    }
+}
+
+const RetentionPolicy& KVStore::getRetentionPolicy() const {
+    return retentionPolicy;
+}
+
+void KVStore::applyRetention(const std::string& key) {
+    auto it = store.find(key);
+    if (it == store.end() || it->second.empty()) {
+        return;
+    }
+    
+    auto& versions = it->second;
+    
+    switch (retentionPolicy.mode) {
+        case RetentionMode::FULL:
+            // Keep all versions
+            break;
+            
+        case RetentionMode::LAST_N:
+            // Keep only the last N versions
+            if (retentionPolicy.count > 0 && versions.size() > static_cast<size_t>(retentionPolicy.count)) {
+                // Erase old versions from the beginning
+                versions.erase(versions.begin(), 
+                              versions.end() - retentionPolicy.count);
+            }
+            break;
+            
+        case RetentionMode::LAST_T:
+            // Keep only versions within the last T seconds
+            if (retentionPolicy.seconds > 0) {
+                auto now = std::chrono::system_clock::now();
+                auto cutoff = now - std::chrono::seconds(retentionPolicy.seconds);
+                
+                // Find first version to keep (first one >= cutoff)
+                auto firstToKeep = std::find_if(versions.begin(), versions.end(),
+                    [cutoff](const Version& v) { return v.timestamp >= cutoff; });
+                
+                // Erase old versions
+                if (firstToKeep != versions.begin()) {
+                    versions.erase(versions.begin(), firstToKeep);
+                }
+            }
+            break;
+    }
+}
+
+// ========== Write Evaluation & Guard Management ==========
+
+WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string& value) {
+    WriteEvaluation evaluation;
+    evaluation.key = key;
+    evaluation.proposedValue = value;
+    evaluation.result = GuardResult::ACCEPT;
+    
+    // Get applicable guards
+    auto applicableGuards = getGuardsForKey(key);
+    
+    if (applicableGuards.empty()) {
+        evaluation.reason = "No guards defined for this key";
+        return evaluation;
+    }
+    
+    // Evaluate each guard
+    bool allAccepted = true;
+    std::vector<Alternative> collectedAlternatives;
+    
+    for (const auto& guard : applicableGuards) {
+        std::string guardReason;
+        GuardResult guardResult = guard->evaluate(value, guardReason);
+        
+        if (guardResult == GuardResult::REJECT) {
+            evaluation.result = GuardResult::REJECT;
+            evaluation.triggeredGuards.push_back(guard->getName());
+            evaluation.reason = guardReason;
+            // For reject, stop immediately
+            return evaluation;
+        } else if (guardResult == GuardResult::COUNTER_OFFER) {
+            allAccepted = false;
+            evaluation.triggeredGuards.push_back(guard->getName());
+            
+            // Collect alternatives from this guard
+            auto guardAlts = guard->generateAlternatives(value);
+            for (const auto& alt : guardAlts) {
+                // Avoid duplicate alternatives
+                bool duplicate = false;
+                for (const auto& existing : collectedAlternatives) {
+                    if (existing.value == alt.value) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    collectedAlternatives.push_back(alt);
+                }
+            }
+            
+            if (evaluation.reason.empty()) {
+                evaluation.reason = guardReason;
+            } else {
+                evaluation.reason += "; " + guardReason;
+            }
+        }
+    }
+    
+    if (!allAccepted) {
+        evaluation.result = GuardResult::COUNTER_OFFER;
+        evaluation.alternatives = collectedAlternatives;
+    } else {
+        evaluation.reason = "All guards passed";
+    }
+    
+    return evaluation;
+}
+
+void KVStore::applyDecisionPolicy(WriteEvaluation& evaluation) {
+    evaluation.appliedPolicy = decisionPolicy;
+    
+    // If all guards passed, no policy needed
+    if (evaluation.result == GuardResult::ACCEPT) {
+        evaluation.policyReasoning = "No policy applied - all guards passed";
+        return;
+    }
+    
+    // Apply policy based on current result
+    switch (decisionPolicy) {
+        case DecisionPolicy::STRICT:
+            // STRICT: Convert all COUNTER_OFFER to REJECT
+            if (evaluation.result == GuardResult::COUNTER_OFFER) {
+                evaluation.result = GuardResult::REJECT;
+                evaluation.policyReasoning = "Rejected under STRICT policy due to guard violation";
+                evaluation.alternatives.clear();  // No alternatives in strict mode
+            } else {
+                evaluation.policyReasoning = "Rejected under STRICT policy due to guard violation";
+            }
+            break;
+            
+        case DecisionPolicy::DEV_FRIENDLY:
+            // DEV_FRIENDLY: Convert REJECT to COUNTER_OFFER if alternatives exist
+            if (evaluation.result == GuardResult::REJECT) {
+                // Check if we can generate any alternatives
+                // For now, keep as REJECT since guards returned it
+                evaluation.policyReasoning = "Rejected under DEV_FRIENDLY policy - value cannot be salvaged";
+            } else if (evaluation.result == GuardResult::COUNTER_OFFER) {
+                evaluation.policyReasoning = "Counter-offer under DEV_FRIENDLY policy - showing alternatives";
+            }
+            break;
+            
+        case DecisionPolicy::SAFE_DEFAULT:
+            // SAFE_DEFAULT: Analyze risk and decide
+            if (evaluation.result == GuardResult::COUNTER_OFFER) {
+                // Check if this is a "low-risk" violation
+                // For now, we'll consider violations with alternatives as low-risk
+                if (evaluation.alternatives.empty()) {
+                    // High-risk: no safe alternatives
+                    evaluation.result = GuardResult::REJECT;
+                    evaluation.policyReasoning = "Rejected under SAFE_DEFAULT policy - no safe alternatives available";
+                } else {
+                    // Low-risk: alternatives available
+                    evaluation.policyReasoning = "Counter-offer under SAFE_DEFAULT policy - safe alternatives available";
+                }
+            } else if (evaluation.result == GuardResult::REJECT) {
+                evaluation.policyReasoning = "Rejected under SAFE_DEFAULT policy - critical violation";
+            }
+            break;
+    }
+}
+
+WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& value) {
+    // Simulate without mutating state
+    auto evaluation = simulateWrite(key, value);
+    
+    // Apply decision policy to the evaluation result
+    applyDecisionPolicy(evaluation);
+    
+    return evaluation;
+}
+
+Status KVStore::commitSet(const std::string& key, const std::string& value) {
+    // Direct commit (bypasses guards - use for forced writes)
+    return set(key, value);
+}
+
+void KVStore::addGuard(std::shared_ptr<Guard> guard) {
+    guards.push_back(guard);
+}
+
+bool KVStore::removeGuard(const std::string& name) {
+    auto it = std::find_if(guards.begin(), guards.end(),
+        [&name](const std::shared_ptr<Guard>& g) { return g->getName() == name; });
+    
+    if (it != guards.end()) {
+        guards.erase(it);
+        return true;
+    }
+    return false;
+}
+
+const std::vector<std::shared_ptr<Guard>>& KVStore::getGuards() const {
+    return guards;
+}
+
+std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKey(const std::string& key) const {
+    std::vector<std::shared_ptr<Guard>> applicable;
+    
+    for (const auto& guard : guards) {
+        if (guard->isEnabled() && guard->appliesTo(key)) {
+            applicable.push_back(guard);
+        }
+    }
+    
+    return applicable;
+}
+
+void KVStore::setDecisionPolicy(DecisionPolicy policy) {
+    decisionPolicy = policy;
+    
+    // Log policy change to WAL
+    if (walEnabled && wal && wal->isEnabled()) {
+        std::string policyName;
+        switch (policy) {
+            case DecisionPolicy::DEV_FRIENDLY:
+                policyName = "DEV_FRIENDLY";
+                break;
+            case DecisionPolicy::SAFE_DEFAULT:
+                policyName = "SAFE_DEFAULT";
+                break;
+            case DecisionPolicy::STRICT:
+                policyName = "STRICT";
+                break;
+        }
+        wal->logPolicy(policyName);
+    }
+}
+
+DecisionPolicy KVStore::getDecisionPolicy() const {
+    return decisionPolicy;
+}

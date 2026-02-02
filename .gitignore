@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# Runtime data
+data/
+*.log
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Docker
+*.tar

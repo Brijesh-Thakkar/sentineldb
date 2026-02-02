@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+data/
+test_data/
+
+# IDE files
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Test scripts
+test_*.sh
+demo_*.txt
+quick_verify.sh
+
+# Temporary files
+*.tmp
+*.log
+*.swp
+*~
