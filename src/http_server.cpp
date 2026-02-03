@@ -7,6 +7,7 @@
 #include "../include/external/httplib.h"
 #include "../include/kvstore.h"
 #include "../include/wal.h"
+#include "../include/guard.h"
 
 // Helper function to parse JSON manually (simple key-value pairs)
 std::unordered_map<std::string, std::string> parseSimpleJSON(const std::string& json) {
@@ -441,8 +442,18 @@ int main(int argc, char* argv[]) {
             std::string key = params["key"];
             std::string value = params["value"];
             
+            std::cout << "[HTTP] POST /propose - Evaluating write: " << key << " = " << value << "\n";
+            
             // Evaluate the proposed write
             auto evaluation = kvstore->proposeSet(key, value);
+            
+            std::cout << "[HTTP] POST /propose - Result: ";
+            switch (evaluation.result) {
+                case GuardResult::ACCEPT: std::cout << "ACCEPT"; break;
+                case GuardResult::REJECT: std::cout << "REJECT"; break;
+                case GuardResult::COUNTER_OFFER: std::cout << "COUNTER_OFFER"; break;
+            }
+            std::cout << " (" << evaluation.alternatives.size() << " alternative(s))\n";
             
             std::stringstream json;
             json << "{\"proposal\":{\"key\":\"" << escapeJSON(key) 
@@ -490,6 +501,7 @@ int main(int argc, char* argv[]) {
     svr.Get("/guards", [kvstore](const httplib::Request&, httplib::Response& res) {
         try {
             const auto& guards = kvstore->getGuards();
+            std::cout << "[HTTP] GET /guards - Retrieved " << guards.size() << " guard(s)\n";
             
             std::stringstream json;
             json << "{\"guards\":[";
@@ -509,6 +521,138 @@ int main(int argc, char* argv[]) {
             res.status = 500;
             std::stringstream json;
             json << "{\"error\":\"" << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+    
+    // POST /guards - Add a new guard constraint
+    // FIX: This endpoint was previously missing, causing guards to not be registerable via HTTP.
+    // Now properly parses JSON, constructs Guard objects, and calls kvstore->addGuard().
+    // Expected JSON formats:
+    // RANGE_INT: {"type":"RANGE_INT","name":"guard_name","keyPattern":"key*","min":"0","max":"100"}
+    // ENUM:      {"type":"ENUM","name":"guard_name","keyPattern":"key*","values":"val1,val2,val3"}
+    // LENGTH:    {"type":"LENGTH","name":"guard_name","keyPattern":"key*","min":"1","max":"50"}
+    svr.Post("/guards", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto params = parseSimpleJSON(req.body);
+            
+            std::cout << "[HTTP] POST /guards - Received guard registration request\n";
+            
+            // Validate required fields
+            if (params.find("type") == params.end() || 
+                params.find("name") == params.end() || 
+                params.find("keyPattern") == params.end()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing required fields: type, name, keyPattern\"}", "application/json");
+                return;
+            }
+            
+            std::string type = params["type"];
+            std::string name = params["name"];
+            std::string keyPattern = params["keyPattern"];
+            
+            // Convert type to uppercase for consistency
+            std::transform(type.begin(), type.end(), type.begin(), ::toupper);
+            
+            std::shared_ptr<Guard> guard;
+            std::string description;
+            
+            if (type == "RANGE_INT" || type == "RANGE") {
+                // Parse min and max values
+                if (params.find("min") == params.end() || params.find("max") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"RANGE_INT requires 'min' and 'max' fields\"}", "application/json");
+                    return;
+                }
+                
+                int min = std::stoi(params["min"]);
+                int max = std::stoi(params["max"]);
+                
+                guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                description = "RANGE_INT [" + std::to_string(min) + ", " + std::to_string(max) + "]";
+                
+            } else if (type == "ENUM") {
+                // Parse values array from JSON
+                // Simple parser expects values as comma-separated string
+                if (params.find("values") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"ENUM requires 'values' field (comma-separated string or JSON array)\"}", "application/json");
+                    return;
+                }
+                
+                std::string valuesStr = params["values"];
+                std::vector<std::string> values;
+                
+                // Parse comma-separated values
+                std::stringstream ss(valuesStr);
+                std::string value;
+                while (std::getline(ss, value, ',')) {
+                    // Trim whitespace
+                    value.erase(0, value.find_first_not_of(" \t\n\r"));
+                    value.erase(value.find_last_not_of(" \t\n\r") + 1);
+                    if (!value.empty()) {
+                        values.push_back(value);
+                    }
+                }
+                
+                if (values.empty()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"ENUM requires at least one value\"}", "application/json");
+                    return;
+                }
+                
+                guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                description = "ENUM with " + std::to_string(values.size()) + " value(s)";
+                
+            } else if (type == "LENGTH") {
+                // Parse min and max length
+                if (params.find("min") == params.end() || params.find("max") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"LENGTH requires 'min' and 'max' fields\"}", "application/json");
+                    return;
+                }
+                
+                size_t min = std::stoul(params["min"]);
+                size_t max = std::stoul(params["max"]);
+                
+                guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                description = "LENGTH [" + std::to_string(min) + ", " + std::to_string(max) + "] characters";
+                
+            } else {
+                res.status = 400;
+                res.set_content("{\"error\":\"Invalid guard type. Use RANGE_INT, ENUM, or LENGTH\"}", "application/json");
+                return;
+            }
+            
+            // Add guard to kvstore
+            kvstore->addGuard(guard);
+            
+            std::cout << "[HTTP] POST /guards - Successfully added guard '" << name 
+                      << "' (type: " << type << ", pattern: " << keyPattern << ")\n";
+            
+            std::stringstream json;
+            json << "{\"status\":\"ok\",\"message\":\"Guard '" << escapeJSON(name) 
+                 << "' added successfully\",\"guard\":{"
+                 << "\"name\":\"" << escapeJSON(name) << "\","
+                 << "\"type\":\"" << escapeJSON(type) << "\","
+                 << "\"keyPattern\":\"" << escapeJSON(keyPattern) << "\","
+                 << "\"description\":\"" << escapeJSON(description) << "\"}}";
+            res.set_content(json.str(), "application/json");
+            
+        } catch (const std::invalid_argument& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid numeric value: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::out_of_range& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Numeric value out of range: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            std::stringstream json;
+            json << "{\"error\":\"Internal error: " << escapeJSON(e.what()) << "\"}";
             res.set_content(json.str(), "application/json");
         }
     });
@@ -651,6 +795,8 @@ int main(int argc, char* argv[]) {
             std::string policyStr = params["policy"];
             std::transform(policyStr.begin(), policyStr.end(), policyStr.begin(), ::toupper);
             
+            std::cout << "[HTTP] POST /policy - Changing policy to: " << policyStr << "\n";
+            
             DecisionPolicy newPolicy;
             if (policyStr == "DEV_FRIENDLY") {
                 newPolicy = DecisionPolicy::DEV_FRIENDLY;
@@ -666,6 +812,8 @@ int main(int argc, char* argv[]) {
             
             // Set policy (will be logged to WAL automatically)
             kvstore->setDecisionPolicy(newPolicy);
+            
+            std::cout << "[HTTP] POST /policy - Policy changed successfully to " << policyStr << "\n";
             
             std::stringstream json;
             json << "{\"status\":\"ok\",\"activePolicy\":\"" << policyStr << "\"}";
@@ -691,6 +839,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  GET  /explain           - Explain temporal query\n";
     std::cout << "  POST /propose           - Propose write (evaluate guards)\n";
     std::cout << "  GET  /guards            - List guard constraints\n";
+    std::cout << "  POST /guards            - Add new guard constraint\n";
     std::cout << "  POST /config/retention  - Configure retention\n";
     std::cout << "  GET  /policy            - Get decision policy\n";
     std::cout << "  POST /policy            - Set decision policy\n";
