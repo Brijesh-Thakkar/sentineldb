@@ -782,7 +782,7 @@ int main(int argc, char* argv[]) {
     });
     
     // POST /policy - Set decision policy
-    svr.Post("/policy", [kvstore](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/policy", [kvstore, wal](const httplib::Request& req, httplib::Response& res) {
         try {
             auto params = parseSimpleJSON(req.body);
             
@@ -810,8 +810,18 @@ int main(int argc, char* argv[]) {
                 return;
             }
             
-            // Set policy (will be logged to WAL automatically)
+            // Set policy in memory
             kvstore->setDecisionPolicy(newPolicy);
+            
+            // Write to WAL for persistence (matching CLI behavior: "POLICY SET <name>")
+            if (wal && wal->isEnabled()) {
+                Status walStatus = wal->logPolicy(policyStr);
+                if (walStatus == Status::OK) {
+                    std::cout << "[HTTP] POST /policy - Written to WAL: POLICY SET " << policyStr << "\n";
+                } else {
+                    std::cout << "[HTTP] POST /policy - WARNING: Failed to write policy to WAL\n";
+                }
+            }
             
             std::cout << "[HTTP] POST /policy - Policy changed successfully to " << policyStr << "\n";
             
