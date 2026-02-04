@@ -4,10 +4,23 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <csignal>
+#include <thread>
 #include "../include/external/httplib.h"
 #include "../include/kvstore.h"
 #include "../include/wal.h"
 #include "../include/guard.h"
+
+// Global atomic flag for shutdown signal handling
+std::atomic<bool> shutdownRequested{false};
+
+// Signal handler for SIGINT and SIGTERM
+void signalHandler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        shutdownRequested.store(true);
+    }
+}
 
 // Helper function to parse JSON manually (simple key-value pairs)
 std::unordered_map<std::string, std::string> parseSimpleJSON(const std::string& json) {
@@ -836,7 +849,11 @@ int main(int argc, char* argv[]) {
         }
     });
     
-    // Start server
+    // Register signal handlers
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+    
+    // Start server in background thread
     std::cout << "Temporal Database HTTP Server\n";
     std::cout << "==============================\n";
     std::cout << "Listening on http://localhost:" << port << "\n";
@@ -854,5 +871,24 @@ int main(int argc, char* argv[]) {
     std::cout << "  GET  /policy            - Get decision policy\n";
     std::cout << "  POST /policy            - Set decision policy\n";
     std::cout << "\nPress Ctrl+C to stop.\n\n";
+    
+    // Start server in background thread
+    std::thread serverThread([&svr, port]() {
+        svr.listen("0.0.0.0", port);
+    });
+    
+    // Keep main thread alive until shutdown signal
+    while (!shutdownRequested.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    
+    // Graceful shutdown
+    std::cout << "\nShutting down...\n";
+    svr.stop();
+    
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+    
     return 0;
 }
