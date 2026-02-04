@@ -1,15 +1,28 @@
-# Build artifacts
+# Build directories
 build/
-cmake-build-*/
+CMakeFiles/
+cmake_install.cmake
+Makefile
 
-# Runtime data
+# Object files
+*.o
+*.o.d
+
+# Binaries
+http_server
+redis_db
+test_temporal
+test_wal_temporal
+
+# CMake cache
+CMakeCache.txt
+
+# Docker volumes / data
 data/
-*.log
+wal.log
 
-# Editor / OS noise
+# Editor / OS junk
 .vscode/
 .idea/
 .DS_Store
 
-# Docker
-*.tar
