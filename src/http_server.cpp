@@ -854,11 +854,5 @@ int main(int argc, char* argv[]) {
     std::cout << "  GET  /policy            - Get decision policy\n";
     std::cout << "  POST /policy            - Set decision policy\n";
     std::cout << "\nPress Ctrl+C to stop.\n\n";
-    
-    if (!svr.listen("0.0.0.0", port)) {
-        std::cerr << "Failed to start server on port " << port << "\n";
-        return 1;
-    }
-    
     return 0;
 }
