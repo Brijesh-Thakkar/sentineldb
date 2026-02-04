@@ -25,5 +25,5 @@ VOLUME ["/app/data"]
 # Expose HTTP port
 EXPOSE 8080
 
-# Default command: run HTTP server
-CMD ["./build/http_server", "--port", "8080"]
+# Default command: run HTTP server with WAL enabled
+CMD ["./build/http_server", "--port", "8080", "--wal", "/app/data/wal.log"]

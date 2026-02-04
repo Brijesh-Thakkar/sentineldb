@@ -183,6 +183,46 @@ int main(int argc, char* argv[]) {
                             kvstore->setDecisionPolicy(DecisionPolicy::STRICT);
                         }
                     }
+                } else if (cmdType == "GUARD") {
+                    std::string subCmd, guardType, name, keyPattern;
+                    iss >> subCmd >> guardType >> name >> keyPattern;
+                    
+                    if (subCmd == "ADD") {
+                        try {
+                            std::shared_ptr<Guard> guard;
+                            
+                            if (guardType == "RANGE_INT") {
+                                int min, max;
+                                iss >> min >> max;
+                                guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                                kvstore->addGuard(guard);
+                                std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                
+                            } else if (guardType == "ENUM") {
+                                std::vector<std::string> values;
+                                std::string value;
+                                while (iss >> value) {
+                                    values.push_back(value);
+                                }
+                                if (!values.empty()) {
+                                    guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
+                                             << values.size() << " values\n";
+                                }
+                                
+                            } else if (guardType == "LENGTH") {
+                                size_t min, max;
+                                iss >> min >> max;
+                                guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                                kvstore->addGuard(guard);
+                                std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                            }
+                        } catch (const std::exception& e) {
+                            std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
+                                     << ": " << e.what() << "\n";
+                        }
+                    }
                 } else if (cmdType == "SET") {
                     std::string key, value;
                     iss >> key >> value;
@@ -194,7 +234,7 @@ int main(int argc, char* argv[]) {
         // Replay WAL commands
         std::vector<std::string> commands = wal->readLog();
         if (!commands.empty()) {
-            // Phase 1: Replay POLICY commands
+            // Phase 1: Replay POLICY and GUARD commands
             for (const auto& cmdLine : commands) {
                 std::istringstream iss(cmdLine);
                 std::string cmdType;
@@ -210,6 +250,46 @@ int main(int argc, char* argv[]) {
                             kvstore->setDecisionPolicy(DecisionPolicy::SAFE_DEFAULT);
                         } else if (policyName == "STRICT") {
                             kvstore->setDecisionPolicy(DecisionPolicy::STRICT);
+                        }
+                    }
+                } else if (cmdType == "GUARD") {
+                    std::string subCmd, guardType, name, keyPattern;
+                    iss >> subCmd >> guardType >> name >> keyPattern;
+                    
+                    if (subCmd == "ADD") {
+                        try {
+                            std::shared_ptr<Guard> guard;
+                            
+                            if (guardType == "RANGE_INT") {
+                                int min, max;
+                                iss >> min >> max;
+                                guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                                kvstore->addGuard(guard);
+                                std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\\n";
+                                
+                            } else if (guardType == "ENUM") {
+                                std::vector<std::string> values;
+                                std::string value;
+                                while (iss >> value) {
+                                    values.push_back(value);
+                                }
+                                if (!values.empty()) {
+                                    guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
+                                             << values.size() << " values\\n";
+                                }
+                                
+                            } else if (guardType == "LENGTH") {
+                                size_t min, max;
+                                iss >> min >> max;
+                                guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                                kvstore->addGuard(guard);
+                                std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\\n";
+                            }
+                        } catch (const std::exception& e) {
+                            std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
+                                     << ": " << e.what() << "\\n";
                         }
                     }
                 }
@@ -545,7 +625,7 @@ int main(int argc, char* argv[]) {
     // RANGE_INT: {"type":"RANGE_INT","name":"guard_name","keyPattern":"key*","min":"0","max":"100"}
     // ENUM:      {"type":"ENUM","name":"guard_name","keyPattern":"key*","values":"val1,val2,val3"}
     // LENGTH:    {"type":"LENGTH","name":"guard_name","keyPattern":"key*","min":"1","max":"50"}
-    svr.Post("/guards", [kvstore](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/guards", [kvstore, wal](const httplib::Request& req, httplib::Response& res) {
         try {
             auto params = parseSimpleJSON(req.body);
             
@@ -639,6 +719,27 @@ int main(int argc, char* argv[]) {
             
             // Add guard to kvstore
             kvstore->addGuard(guard);
+            
+            // Persist to WAL
+            if (wal && wal->isEnabled()) {
+                std::string walParams;
+                if (type == "RANGE_INT" || type == "RANGE") {
+                    walParams = params["min"] + " " + params["max"];
+                } else if (type == "ENUM") {
+                    walParams = params["values"];
+                    // Replace commas with spaces for WAL format
+                    std::replace(walParams.begin(), walParams.end(), ',', ' ');
+                } else if (type == "LENGTH") {
+                    walParams = params["min"] + " " + params["max"];
+                }
+                
+                Status walStatus = wal->logGuardAdd(type, name, keyPattern, walParams);
+                if (walStatus == Status::OK) {
+                    std::cout << "[HTTP] POST /guards - Written to WAL: GUARD ADD " << type << " " << name << "\n";
+                } else {
+                    std::cout << "[HTTP] POST /guards - WARNING: Failed to write guard to WAL\n";
+                }
+            }
             
             std::cout << "[HTTP] POST /guards - Successfully added guard '" << name 
                       << "' (type: " << type << ", pattern: " << keyPattern << ")\n";

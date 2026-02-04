@@ -40,6 +40,10 @@ public:
     // Log a POLICY SET command to WAL
     Status logPolicy(const std::string& policyName);
     
+    // Log a GUARD ADD command to WAL
+    Status logGuardAdd(const std::string& guardType, const std::string& guardName,
+                       const std::string& keyPattern, const std::string& params);
+    
     // Read all commands from WAL file
     std::vector<std::string> readLog();
     

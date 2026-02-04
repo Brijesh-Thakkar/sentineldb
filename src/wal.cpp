@@ -112,6 +112,23 @@ Status WAL::logPolicy(const std::string& policyName) {
     }
 }
 
+Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardName,
+                        const std::string& keyPattern, const std::string& params) {
+    if (!enabled || !logFile.is_open()) {
+        return Status::ERROR;
+    }
+    
+    try {
+        logFile << "GUARD ADD " << guardType << " " << guardName << " " 
+                << keyPattern << " " << params << "\n";
+        logFile.flush();
+        return Status::OK;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to write guard to WAL: " << e.what() << "\n";
+        return Status::ERROR;
+    }
+}
+
 std::vector<std::string> WAL::readLog() {
     std::vector<std::string> commands;
     
