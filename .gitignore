@@ -1,12 +1,9 @@
-# Build directories
+# CMake / build artifacts
 build/
 CMakeFiles/
-cmake_install.cmake
+CMakeCache.txt
 Makefile
-
-# Object files
-*.o
-*.o.d
+cmake_install.cmake
 
 # Binaries
 http_server
@@ -14,15 +11,10 @@ redis_db
 test_temporal
 test_wal_temporal
 
-# CMake cache
-CMakeCache.txt
+# Object files
+*.o
+*.o.d
 
-# Docker volumes / data
+# Runtime data
 data/
 wal.log
-
-# Editor / OS junk
-.vscode/
-.idea/
-.DS_Store
-
