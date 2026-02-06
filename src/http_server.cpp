@@ -194,9 +194,13 @@ int main(int argc, char* argv[]) {
                             if (guardType == "RANGE_INT") {
                                 int min, max;
                                 iss >> min >> max;
-                                guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
-                                kvstore->addGuard(guard);
-                                std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                } else {
+                                    std::cout << "[WAL Replay] Skipped duplicate RANGE_INT guard: " << name << "\n";
+                                }
                                 
                             } else if (guardType == "ENUM") {
                                 std::vector<std::string> values;
@@ -205,18 +209,26 @@ int main(int argc, char* argv[]) {
                                     values.push_back(value);
                                 }
                                 if (!values.empty()) {
-                                    guard = std::make_shared<EnumGuard>(name, keyPattern, values);
-                                    kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
-                                             << values.size() << " values\n";
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                                        kvstore->addGuard(guard);
+                                        std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
+                                                 << values.size() << " values\n";
+                                    } else {
+                                        std::cout << "[WAL Replay] Skipped duplicate ENUM guard: " << name << "\n";
+                                    }
                                 }
                                 
                             } else if (guardType == "LENGTH") {
                                 size_t min, max;
                                 iss >> min >> max;
-                                guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
-                                kvstore->addGuard(guard);
-                                std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                                } else {
+                                    std::cout << "[WAL Replay] Skipped duplicate LENGTH guard: " << name << "\n";
+                                }
                             }
                         } catch (const std::exception& e) {
                             std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
@@ -263,9 +275,13 @@ int main(int argc, char* argv[]) {
                             if (guardType == "RANGE_INT") {
                                 int min, max;
                                 iss >> min >> max;
-                                guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
-                                kvstore->addGuard(guard);
-                                std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\\n";
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                } else {
+                                    std::cout << "[WAL Replay] Skipped duplicate RANGE_INT guard: " << name << "\n";
+                                }
                                 
                             } else if (guardType == "ENUM") {
                                 std::vector<std::string> values;
@@ -274,18 +290,26 @@ int main(int argc, char* argv[]) {
                                     values.push_back(value);
                                 }
                                 if (!values.empty()) {
-                                    guard = std::make_shared<EnumGuard>(name, keyPattern, values);
-                                    kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
-                                             << values.size() << " values\\n";
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                                        kvstore->addGuard(guard);
+                                        std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
+                                                 << values.size() << " values\n";
+                                    } else {
+                                        std::cout << "[WAL Replay] Skipped duplicate ENUM guard: " << name << "\n";
+                                    }
                                 }
                                 
                             } else if (guardType == "LENGTH") {
                                 size_t min, max;
                                 iss >> min >> max;
-                                guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
-                                kvstore->addGuard(guard);
-                                std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\\n";
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                                    kvstore->addGuard(guard);
+                                    std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                                } else {
+                                    std::cout << "[WAL Replay] Skipped duplicate LENGTH guard: " << name << "\n";
+                                }
                             }
                         } catch (const std::exception& e) {
                             std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
