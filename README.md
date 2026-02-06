@@ -50,7 +50,22 @@ Same constraint. Different policy. Different outcome.
 
 ## 🚀 Quick Start (Docker)
 
-### 1. Run SentinelDB
+Get SentinelDB running in under 2 minutes with Docker. This guide walks you through deployment, testing the guard system, and verifying Write-Ahead Log (WAL) persistence.
+
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/Brijesh-Thakkar/sentineldb.git
+cd sentineldb
+```
+
+### Step 2: Build the Docker Image
+```bash
+docker build -t sentineldb .
+```
+
+This compiles the C++ codebase and packages the HTTP server into a container.
+
+### Step 3: Run SentinelDB
 ```bash
 docker run -d \
   --name sentineldb \
@@ -59,12 +74,21 @@ docker run -d \
   sentineldb
 ```
 
-### 2. Health check
+The `-v sentineldb-data:/app/data` flag ensures data persists across container restarts using a named Docker volume.
+
+### Step 4: Health Check
 ```bash
 curl http://localhost:8080/health
 ```
 
-### 3. Add a guard
+**Expected Response:**
+```json
+{"status":"ok"}
+```
+
+✅ SentinelDB is now running and ready to accept requests.
+
+### Step 5: Add a Guard Constraint
 ```bash
 curl -X POST http://localhost:8080/guards \
   -H "Content-Type: application/json" \
@@ -77,19 +101,92 @@ curl -X POST http://localhost:8080/guards \
   }'
 ```
 
-### 4. Propose a write
+**Expected Response:**
+```json
+{
+  "status": "ok",
+  "message": "Guard 'score_guard' added successfully",
+  "guard": {
+    "name": "score_guard",
+    "type": "RANGE_INT",
+    "keyPattern": "score*",
+    "description": "RANGE_INT [0, 100]"
+  }
+}
+```
+
+This guard ensures any key matching `score*` must have an integer value between 0 and 100.
+
+### Step 6: Propose a Write (Test the Guard)
 ```bash
 curl -X POST http://localhost:8080/propose \
+  -H "Content-Type: application/json" \
   -d '{"key":"score","value":"150"}'
 ```
 
-### 5. Restart-safe
+**Expected Response:**
+```json
+{
+  "proposal": {
+    "key": "score",
+    "value": "150"
+  },
+  "result": "COUNTER_OFFER",
+  "reason": "Value 150 outside acceptable range [0, 100]",
+  "triggeredGuards": ["score_guard"],
+  "alternatives": [
+    {
+      "value": "100",
+      "explanation": "Maximum allowed value (proposed 150 is too high)"
+    },
+    {
+      "value": "75",
+      "explanation": "Conservative value within range"
+    }
+  ]
+}
+```
+
+Instead of rejecting the write, SentinelDB **negotiates** by proposing safe alternatives.
+
+### Step 7: Verify WAL Persistence (Restart-Safe)
 ```bash
 docker restart sentineldb
+sleep 3
 curl http://localhost:8080/guards
 ```
 
-Guards persist automatically using Write-Ahead Logging (WAL).
+**Expected Response:**
+```json
+{
+  "guards": [
+    {
+      "name": "score_guard",
+      "keyPattern": "score*",
+      "description": "Integer range: [0, 100]",
+      "enabled": true
+    }
+  ]
+}
+```
+
+✅ The guard survived the restart. SentinelDB uses a **Write-Ahead Log (WAL)** to ensure all guards, policies, and data persist to disk before acknowledging writes. WAL replay during startup guarantees idempotent recovery—restarting multiple times produces identical state.
+
+---
+
+### Deployment Notes
+
+**AWS EC2 Demo Instance**  
+A public demo instance is available at `http://3.107.112.47:8080` for testing. This instance is **not production-grade** and may be stopped or reset at any time. Use it for experimentation only.
+
+⚠️ **For production deployments:**
+- Use a Docker restart policy: `docker run --restart=unless-stopped ...`
+- Mount persistent volumes for `/app/data` to preserve WAL and snapshots
+- Run behind a reverse proxy (e.g., nginx) with proper authentication
+- Configure firewall rules to restrict access to trusted IPs
+
+**WAL and Data Durability**  
+SentinelDB writes all operations (guards, policies, data) to a WAL before acknowledging success. On restart, the WAL is replayed to restore exact state. Duplicate entries (e.g., guards with the same name) are automatically deduplicated during replay to maintain idempotency.
 
 ## Run with Docker
 
