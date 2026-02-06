@@ -48,6 +48,49 @@ Same constraint. Different policy. Different outcome.
 - **Configurable Retention** - Control version history (FULL, LAST_N, LAST_T)
 - **CLI + HTTP API** - Full feature parity across interfaces
 
+## 🚀 Quick Start (Docker)
+
+### 1. Run SentinelDB
+```bash
+docker run -d \
+  --name sentineldb \
+  -p 8080:8080 \
+  -v sentineldb-data:/app/data \
+  sentineldb
+```
+
+### 2. Health check
+```bash
+curl http://localhost:8080/health
+```
+
+### 3. Add a guard
+```bash
+curl -X POST http://localhost:8080/guards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type":"RANGE_INT",
+    "name":"score_guard",
+    "keyPattern":"score*",
+    "min":"0",
+    "max":"100"
+  }'
+```
+
+### 4. Propose a write
+```bash
+curl -X POST http://localhost:8080/propose \
+  -d '{"key":"score","value":"150"}'
+```
+
+### 5. Restart-safe
+```bash
+docker restart sentineldb
+curl http://localhost:8080/guards
+```
+
+Guards persist automatically using Write-Ahead Logging (WAL).
+
 ## Run with Docker
 
 Build the image:
