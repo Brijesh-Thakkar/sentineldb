@@ -130,6 +130,9 @@ public:
     // Add a guard constraint
     void addGuard(std::shared_ptr<Guard> guard);
     
+    // Check if a guard with the given name exists
+    bool hasGuard(const std::string& name) const;
+    
     // Remove a guard by name
     bool removeGuard(const std::string& name);
     

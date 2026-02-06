@@ -386,6 +386,13 @@ void KVStore::addGuard(std::shared_ptr<Guard> guard) {
     guards.push_back(guard);
 }
 
+bool KVStore::hasGuard(const std::string& name) const {
+    return std::find_if(guards.begin(), guards.end(),
+        [&name](const std::shared_ptr<Guard>& g) { 
+            return g->getName() == name; 
+        }) != guards.end();
+}
+
 bool KVStore::removeGuard(const std::string& name) {
     auto it = std::find_if(guards.begin(), guards.end(),
         [&name](const std::shared_ptr<Guard>& g) { return g->getName() == name; });
