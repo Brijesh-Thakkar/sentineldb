@@ -188,6 +188,83 @@ A public demo instance is available at `http://3.107.112.47:8080` for testing. T
 **WAL and Data Durability**  
 SentinelDB writes all operations (guards, policies, data) to a WAL before acknowledging success. On restart, the WAL is replayed to restore exact state. Duplicate entries (e.g., guards with the same name) are automatically deduplicated during replay to maintain idempotency.
 
+## Live Deployment (AWS EC2)
+
+SentinelDB is deployed on AWS EC2 at **`http://3.107.112.47:8080`** for demonstration and testing.
+
+**Important:** SentinelDB is an API-first backend service. It does not serve a user interface at the root path `/`. Accessing `http://3.107.112.47:8080/` will return **HTTP 404**, which is expected behavior. All interaction happens through REST API endpoints.
+
+### Health Check
+```bash
+curl http://3.107.112.47:8080/health
+```
+
+**Response:**
+```json
+{"status":"ok"}
+```
+
+### List All Guards
+```bash
+curl http://3.107.112.47:8080/guards
+```
+
+**Response:**
+```json
+{
+  "guards": [
+    {
+      "name": "score_guard",
+      "keyPattern": "score*",
+      "description": "Integer range: [0, 100]",
+      "enabled": true
+    }
+  ]
+}
+```
+
+### Add a New Guard
+```bash
+curl -X POST http://3.107.112.47:8080/guards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "RANGE_INT",
+    "name": "age_guard",
+    "keyPattern": "age*",
+    "min": "0",
+    "max": "120"
+  }'
+```
+
+### Propose a Write (Test Guard Evaluation)
+```bash
+curl -X POST http://3.107.112.47:8080/propose \
+  -H "Content-Type: application/json" \
+  -d '{"key":"score","value":"150"}'
+```
+
+**Response:**
+```json
+{
+  "proposal": {"key": "score", "value": "150"},
+  "result": "COUNTER_OFFER",
+  "reason": "Value 150 outside acceptable range [0, 100]",
+  "triggeredGuards": ["score_guard"],
+  "alternatives": [
+    {"value": "100", "explanation": "Maximum allowed value (proposed 150 is too high)"},
+    {"value": "75", "explanation": "Conservative value within range"}
+  ]
+}
+```
+
+**Deployment Stack:**
+- **Platform:** AWS EC2 (t2.micro)
+- **OS:** Ubuntu 24.04 LTS
+- **Runtime:** Docker with persistent volume mount
+- **Persistence:** Write-Ahead Log (WAL) + Snapshots
+
+**Note:** This is a public demo instance. Data may be reset, and the instance may be stopped without notice. Not intended for production use.
+
 ## Run with Docker
 
 Build the image:
