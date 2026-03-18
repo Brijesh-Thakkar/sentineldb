@@ -3,8 +3,12 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <cctype>
+#include <iomanip>
 
 WAL::WAL(const std::string& path) : walPath(path), enabled(false) {
     // Derive snapshot path from WAL path
@@ -21,10 +25,27 @@ WAL::~WAL() {
         try {
             logFile.flush();
             logFile.close();
+            if (logFd_ != -1) {
+                ::close(logFd_);
+                logFd_ = -1;
+            }
         } catch (...) {
             // Silently handle errors during destruction
         }
     }
+}
+
+// Simple CRC32 implementation (no external dependencies)
+uint32_t WAL::computeCRC32(const std::string& data) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (unsigned char byte : data) {
+        crc ^= byte;
+        for (int i = 0; i < 8; i++) {
+            uint32_t mask = -(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB88320 & mask);
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
 }
 
 Status WAL::initialize() {
@@ -48,6 +69,7 @@ Status WAL::initialize() {
             enabled = false;
             return Status::ERROR;
         }
+        logFd_ = ::open(walPath.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
         
         enabled = true;
         std::cout << "WAL initialized: " << walPath << "\n";
@@ -73,8 +95,13 @@ Status WAL::logSet(const std::string& key, const std::string& value,
             timestamp.time_since_epoch()).count();
         
         // Format: SET key value timestamp_ms
-        logFile << "SET " << key << " " << value << " " << epochMs << "\n";
+        std::string content = "SET " + key + " " + value + " " + std::to_string(epochMs);
+        uint32_t crc = computeCRC32(content);
+        logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+            << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
+        // fsync: force kernel buffer to physical disk
+        if (logFd_ != -1) { ::fsync(logFd_); }
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -88,8 +115,13 @@ Status WAL::logDel(const std::string& key) {
     }
     
     try {
-        logFile << "DEL " << key << "\n";
+        std::string content = "DEL " + key;
+        uint32_t crc = computeCRC32(content);
+        logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+            << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
+        // fsync: force kernel buffer to physical disk
+        if (logFd_ != -1) { ::fsync(logFd_); }
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -103,8 +135,13 @@ Status WAL::logPolicy(const std::string& policyName) {
     }
     
     try {
-        logFile << "POLICY SET " << policyName << "\n";
+        std::string content = "POLICY SET " + policyName;
+        uint32_t crc = computeCRC32(content);
+        logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+            << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
+        // fsync: force kernel buffer to physical disk
+        if (logFd_ != -1) { ::fsync(logFd_); }
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -119,9 +156,14 @@ Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardNa
     }
     
     try {
-        logFile << "GUARD ADD " << guardType << " " << guardName << " " 
-                << keyPattern << " " << params << "\n";
+        std::string content = "GUARD ADD " + guardType + " " + guardName + " "
+            + keyPattern + " " + params;
+        uint32_t crc = computeCRC32(content);
+        logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+                << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush();
+        // fsync: force kernel buffer to physical disk
+        if (logFd_ != -1) { ::fsync(logFd_); }
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write guard to WAL: " << e.what() << "\n";
@@ -131,6 +173,7 @@ Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardNa
 
 std::vector<std::string> WAL::readLog() {
     std::vector<std::string> commands;
+    size_t checksumErrors = 0;
     
     try {
         if (!fileExists(walPath)) {
@@ -145,13 +188,50 @@ std::vector<std::string> WAL::readLog() {
         }
         
         std::string line;
+        const std::string crcMarker = " CRC:";
         while (std::getline(inFile, line)) {
             if (!line.empty()) {
+                size_t markerPos = line.rfind(crcMarker);
+                if (markerPos != std::string::npos && markerPos + crcMarker.size() < line.size()) {
+                    std::string content = line.substr(0, markerPos);
+                    std::string crcHex = line.substr(markerPos + crcMarker.size());
+
+                    bool isHex = (crcHex.size() == 8);
+                    for (char c : crcHex) {
+                        if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                            isHex = false;
+                            break;
+                        }
+                    }
+
+                    if (isHex) {
+                        try {
+                            uint32_t expectedCrc = static_cast<uint32_t>(std::stoul(crcHex, nullptr, 16));
+                            uint32_t actualCrc = computeCRC32(content);
+                            if (actualCrc != expectedCrc) {
+                                std::cerr << "Warning: WAL checksum mismatch, skipping corrupt record\n";
+                                checksumErrors++;
+                                continue;
+                            }
+                            commands.push_back(content);
+                            continue;
+                        } catch (...) {
+                            // Fall through to legacy handling below
+                        }
+                    }
+                }
+
+                // Legacy record without CRC field (backward compatible)
                 commands.push_back(line);
             }
         }
         
         inFile.close();
+
+        if (checksumErrors > 0) {
+            std::cerr << "WARNING: " << checksumErrors
+                      << " WAL records had checksum errors and were skipped (possible corruption)\n";
+        }
         
         if (!commands.empty()) {
             std::cout << "Loaded " << commands.size() << " commands from WAL\n";
@@ -220,6 +300,9 @@ Status WAL::createSnapshot(const std::unordered_map<std::string, std::string>& d
         }
         
         snapFile.flush();
+        int snapFd = ::open(snapshotPath.c_str(), O_WRONLY, 0644);
+        // fsync: force kernel buffer to physical disk
+        if (snapFd != -1) { ::fsync(snapFd); ::close(snapFd); }
         snapFile.close();
         
         // Clear the WAL after successful snapshot
@@ -310,6 +393,8 @@ Status WAL::clearLog() {
             enabled = false;
             return Status::ERROR;
         }
+        if (logFd_ != -1) { ::close(logFd_); }
+        logFd_ = ::open(walPath.c_str(), O_WRONLY | O_APPEND, 0644);
         
         std::cout << "WAL log cleared\n";
         return Status::OK;

@@ -7,6 +7,8 @@
 #include <atomic>
 #include <csignal>
 #include <thread>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "../include/external/httplib.h"
 #include "../include/kvstore.h"
 #include "../include/wal.h"
@@ -121,7 +123,7 @@ std::chrono::system_clock::time_point parseTimestamp(const std::string& timeStr)
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     int port = 8080;
-    std::string walPath = "";
+    std::string walPath = "data/wal.log";
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -133,9 +135,21 @@ int main(int argc, char* argv[]) {
             std::cout << "Usage: " << argv[0] << " [OPTIONS]\n"
                       << "Options:\n"
                       << "  --port <num>    HTTP port (default: 8080)\n"
-                      << "  --wal <path>    WAL file path (default: no WAL)\n"
+                      << "  --wal <path>    WAL file path (default: data/wal.log)\n"
                       << "  --help          Show this help\n";
             return 0;
+        }
+    }
+
+    // Ensure WAL directory exists
+    {
+        size_t lastSlash = walPath.find_last_of("/\\");
+        if (lastSlash != std::string::npos) {
+            std::string dirPath = walPath.substr(0, lastSlash);
+            struct stat st;
+            if (stat(dirPath.c_str(), &st) != 0) {
+                mkdir(dirPath.c_str(), 0755);
+            }
         }
     }
     

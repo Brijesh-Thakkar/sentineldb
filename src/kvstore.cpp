@@ -1,11 +1,19 @@
 #include "kvstore.h"
 #include <algorithm>
 #include <sstream>
+#include <mutex>
+#include <shared_mutex>
 
 KVStore::KVStore(std::shared_ptr<WAL> walPtr) 
     : wal(walPtr), walEnabled(true), decisionPolicy(DecisionPolicy::SAFE_DEFAULT) {}
 
 Status KVStore::set(const std::string& key, const std::string& value) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    return setInternal(key, value);
+}
+
+Status KVStore::setInternal(const std::string& key, const std::string& value) {
     // Create version with current timestamp
     auto timestamp = std::chrono::system_clock::now();
     
@@ -29,6 +37,8 @@ Status KVStore::set(const std::string& key, const std::string& value) {
 
 Status KVStore::setAtTime(const std::string& key, const std::string& value,
                           std::chrono::system_clock::time_point timestamp) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     // This is for replay - do NOT log to WAL
     // Just add the version with the given timestamp
     store[key].emplace_back(timestamp, value);
@@ -40,6 +50,8 @@ Status KVStore::setAtTime(const std::string& key, const std::string& value,
 }
 
 std::optional<std::string> KVStore::get(const std::string& key) {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it != store.end() && !it->second.empty()) {
         // Return the latest version (last element)
@@ -49,6 +61,8 @@ std::optional<std::string> KVStore::get(const std::string& key) {
 }
 
 Status KVStore::del(const std::string& key) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it != store.end()) {
         // Write to WAL first (if enabled)
@@ -69,6 +83,8 @@ Status KVStore::del(const std::string& key) {
 
 std::optional<std::string> KVStore::getAtTime(const std::string& key, 
                                                std::chrono::system_clock::time_point timestamp) {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it == store.end() || it->second.empty()) {
         return std::nullopt;
@@ -92,6 +108,8 @@ std::optional<std::string> KVStore::getAtTime(const std::string& key,
 
 ExplainResult KVStore::explainGetAtTime(const std::string& key,
                                          std::chrono::system_clock::time_point timestamp) {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     ExplainResult result;
     result.found = false;
     result.key = key;
@@ -160,6 +178,8 @@ ExplainResult KVStore::explainGetAtTime(const std::string& key,
 }
 
 std::vector<Version> KVStore::getHistory(const std::string& key) {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it != store.end()) {
         return it->second;
@@ -168,14 +188,20 @@ std::vector<Version> KVStore::getHistory(const std::string& key) {
 }
 
 bool KVStore::exists(const std::string& key) const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return store.find(key) != store.end();
 }
 
 size_t KVStore::size() const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return store.size();
 }
 
 std::unordered_map<std::string, std::string> KVStore::getAllData() const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     std::unordered_map<std::string, std::string> result;
     for (const auto& [key, versions] : store) {
         if (!versions.empty()) {
@@ -191,6 +217,8 @@ void KVStore::setWalEnabled(bool enabled) {
 }
 
 void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     retentionPolicy = policy;
     
     // Apply new policy to all existing keys
@@ -202,6 +230,8 @@ void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
 }
 
 const RetentionPolicy& KVStore::getRetentionPolicy() const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return retentionPolicy;
 }
 
@@ -255,7 +285,7 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
     evaluation.result = GuardResult::ACCEPT;
     
     // Get applicable guards
-    auto applicableGuards = getGuardsForKey(key);
+    auto applicableGuards = getGuardsForKeyInternal(key);
     
     if (applicableGuards.empty()) {
         evaluation.reason = "No guards defined for this key";
@@ -368,6 +398,8 @@ void KVStore::applyDecisionPolicy(WriteEvaluation& evaluation) {
 }
 
 WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& value) {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     // Simulate without mutating state
     auto evaluation = simulateWrite(key, value);
     
@@ -378,15 +410,21 @@ WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& v
 }
 
 Status KVStore::commitSet(const std::string& key, const std::string& value) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     // Direct commit (bypasses guards - use for forced writes)
-    return set(key, value);
+    return setInternal(key, value);
 }
 
 void KVStore::addGuard(std::shared_ptr<Guard> guard) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     guards.push_back(guard);
 }
 
 bool KVStore::hasGuard(const std::string& name) const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return std::find_if(guards.begin(), guards.end(),
         [&name](const std::shared_ptr<Guard>& g) { 
             return g->getName() == name; 
@@ -394,6 +432,8 @@ bool KVStore::hasGuard(const std::string& name) const {
 }
 
 bool KVStore::removeGuard(const std::string& name) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     auto it = std::find_if(guards.begin(), guards.end(),
         [&name](const std::shared_ptr<Guard>& g) { return g->getName() == name; });
     
@@ -405,10 +445,18 @@ bool KVStore::removeGuard(const std::string& name) {
 }
 
 const std::vector<std::shared_ptr<Guard>>& KVStore::getGuards() const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return guards;
 }
 
 std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKey(const std::string& key) const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    return getGuardsForKeyInternal(key);
+}
+
+std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKeyInternal(const std::string& key) const {
     std::vector<std::shared_ptr<Guard>> applicable;
     
     for (const auto& guard : guards) {
@@ -421,6 +469,8 @@ std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKey(const std::string& 
 }
 
 void KVStore::setDecisionPolicy(DecisionPolicy policy) {
+    // Thread safety: reader/writer lock
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     decisionPolicy = policy;
     
     // Log policy change to WAL
@@ -442,5 +492,7 @@ void KVStore::setDecisionPolicy(DecisionPolicy policy) {
 }
 
 DecisionPolicy KVStore::getDecisionPolicy() const {
+    // Thread safety: reader/writer lock
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return decisionPolicy;
 }

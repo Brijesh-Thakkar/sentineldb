@@ -7,6 +7,7 @@
 #include <optional>
 #include <memory>
 #include <chrono>
+#include <shared_mutex>
 #include "status.h"
 #include "wal.h"
 #include "guard.h"
@@ -63,6 +64,13 @@ private:
     RetentionPolicy retentionPolicy;
     std::vector<std::shared_ptr<Guard>> guards;  // Active guard constraints
     DecisionPolicy decisionPolicy;  // Active decision policy for guard violations
+    mutable std::shared_mutex rwMutex_;
+
+    // Internal set implementation for already-locked callers
+    Status setInternal(const std::string& key, const std::string& value);
+
+    // Internal helper for already-locked callers
+    std::vector<std::shared_ptr<Guard>> getGuardsForKeyInternal(const std::string& key) const;
     
     // Apply retention policy to a key's versions
     void applyRetention(const std::string& key);

@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <chrono>
+#include <cstdint>
 #include "status.h"
 
 // Write-Ahead Log manager for persistence
@@ -14,6 +15,7 @@ private:
     std::string walPath;
     std::string snapshotPath;
     std::ofstream logFile;
+    int logFd_{-1};
     bool enabled;
 
 public:
@@ -61,6 +63,8 @@ public:
     void flush();
     
 private:
+    static uint32_t computeCRC32(const std::string& data);
+
     // Create directory if it doesn't exist
     bool createDirectory(const std::string& path);
     
