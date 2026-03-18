@@ -1,3 +1,5 @@
+[![CI](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml/badge.svg)](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml)
+
 # SentinelDB
 
 SentinelDB is a negotiating temporal database that simulates writes, enforces guardrails, and proposes safe alternatives instead of blindly accepting or rejecting data.
