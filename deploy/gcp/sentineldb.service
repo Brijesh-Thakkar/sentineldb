@@ -1,0 +1,21 @@
+[Unit]
+Description=SentinelDB Key-Value Store
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=sentineldb
+WorkingDirectory=/opt/sentineldb
+ExecStart=/opt/sentineldb/build/http_server --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentineldb
+MemoryMax=700M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
