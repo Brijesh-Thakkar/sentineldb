@@ -45,10 +45,12 @@ add_executable(http_server
     src/guard.cpp
 )
 
-# Link pthread for http_server (required by cpp-httplib)
-if(UNIX)
-    target_link_libraries(http_server pthread)
-endif()
+# Link pthread for all targets
+foreach(target redis_db test_temporal test_wal_temporal http_server)
+    if(UNIX)
+        target_link_libraries(${target} pthread)
+    endif()
+endforeach()
 
 # Enable warnings
 if(MSVC)

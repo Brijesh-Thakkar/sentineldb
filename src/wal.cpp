@@ -21,6 +21,16 @@ WAL::WAL(const std::string& path) : walPath(path), enabled(false) {
 }
 
 WAL::~WAL() {
+    {
+        std::lock_guard<std::mutex> lock(flushMutex_);
+        flushShutdown_ = true;
+        pendingFlush_ = true;
+    }
+    flushCV_.notify_all();
+    if (flushThread_.joinable()) {
+        flushThread_.join();
+    }
+
     if (logFile.is_open()) {
         try {
             logFile.flush();
@@ -48,6 +58,24 @@ uint32_t WAL::computeCRC32(const std::string& data) {
     return crc ^ 0xFFFFFFFF;
 }
 
+void WAL::flushThreadFunc() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(flushMutex_);
+        flushCV_.wait_for(lock, std::chrono::milliseconds(5),
+            [this] { return pendingFlush_ || flushShutdown_; });
+
+        if (flushShutdown_ && !pendingFlush_) break;
+
+        if (pendingFlush_) {
+            pendingFlush_ = false;
+            lock.unlock();
+            if (logFd_ != -1) {
+                ::fsync(logFd_);
+            }
+        }
+    }
+}
+
 Status WAL::initialize() {
     try {
         // Extract directory path from file path
@@ -70,6 +98,9 @@ Status WAL::initialize() {
             return Status::ERROR;
         }
         logFd_ = ::open(walPath.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+        flushShutdown_ = false;
+        pendingFlush_ = false;
+        flushThread_ = std::thread(&WAL::flushThreadFunc, this);
         
         enabled = true;
         std::cout << "WAL initialized: " << walPath << "\n";
@@ -100,8 +131,12 @@ Status WAL::logSet(const std::string& key, const std::string& value,
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
             << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
-        // fsync: force kernel buffer to physical disk
-        if (logFd_ != -1) { ::fsync(logFd_); }
+        // Group commit: signal background thread to fsync within 5ms
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -120,8 +155,12 @@ Status WAL::logDel(const std::string& key) {
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
             << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
-        // fsync: force kernel buffer to physical disk
-        if (logFd_ != -1) { ::fsync(logFd_); }
+        // Group commit: signal background thread to fsync within 5ms
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -140,8 +179,12 @@ Status WAL::logPolicy(const std::string& policyName) {
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
             << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush(); // Ensure it's written to disk
-        // fsync: force kernel buffer to physical disk
-        if (logFd_ != -1) { ::fsync(logFd_); }
+        // Group commit: signal background thread to fsync within 5ms
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write to WAL: " << e.what() << "\n";
@@ -162,8 +205,12 @@ Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardNa
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
                 << crc << std::dec << std::setfill(' ') << "\n";
         logFile.flush();
-        // fsync: force kernel buffer to physical disk
-        if (logFd_ != -1) { ::fsync(logFd_); }
+        // Group commit: signal background thread to fsync within 5ms
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
         return Status::OK;
     } catch (const std::exception& e) {
         std::cerr << "Warning: Failed to write guard to WAL: " << e.what() << "\n";

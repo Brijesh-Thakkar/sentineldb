@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <chrono>
 #include <cstdint>
+#include <thread>
+#include <condition_variable>
 #include "status.h"
 
 // Write-Ahead Log manager for persistence
@@ -17,6 +19,14 @@ private:
     std::ofstream logFile;
     int logFd_{-1};
     bool enabled;
+
+    // Group commit
+    std::thread flushThread_;
+    std::mutex flushMutex_;
+    std::condition_variable flushCV_;
+    bool flushShutdown_{false};
+    bool pendingFlush_{false};
+    void flushThreadFunc();
 
 public:
     // Constructor with WAL file path
