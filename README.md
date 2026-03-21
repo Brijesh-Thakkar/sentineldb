@@ -1,3 +1,5 @@
+> 🚀 **Live Demo:** http://3.26.47.215:8080/health
+
 [![CI](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml/badge.svg)](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml)
 
 # SentinelDB
